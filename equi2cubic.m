@@ -41,6 +41,13 @@ vfov = vfov*pi/180; % Convert to radians
 % Output images
 out = cell(1,6);
 
+% Set the image data type
+is_uint = false;
+if isa(im, 'uint8')
+    is_uint = true;
+    im = im2double(im);
+end
+
 % Define yaw, pitch and roll for viewing of each cube face
 % In degrees
 views = [0 0 0; % Front
@@ -74,18 +81,19 @@ lookup_atan = [tan(step_atan/2 - pi/2) tan((1:res_atan-1)*step_atan ...
 X = X(:);
 Y = Y(:);
 
-% Input image co-ordinates
-[XImage, YImage] = meshgrid(1:input_width, 1:input_height);
+% Bundled face maps, for faster interp2()
+mapx_bundle = zeros(output_height, size(views, 1) * output_width);
+mapy_bundle = zeros(output_height, size(views, 1) * output_width);
 
 for idx = 1 : size(views,1)
     % Get yaw, pitch and roll of a particular view
     yaw = views(idx,1);
     pitch = views(idx,2);
     roll = views(idx,3);
-    
+
     % Get transformation matrix
     transform = roty(yaw)*rotx(pitch)*rotz(roll);
-    
+
     % Rotate grid co-ordinates for cube face so that we are
     % writing to the right face
     points = [topLeft(1) + uv(1)*X.'; topLeft(2) + uv(2)*Y.'; ...
@@ -94,53 +102,51 @@ for idx = 1 : size(views,1)
     x_points = moved_points(1,:);
     y_points = moved_points(2,:);
     z_points = moved_points(3,:);
-    
+
     % Determine correct equirectangular co-ordinates
     % for each pixel within the cube face to sample from
     nxz = sqrt(x_points.^2 + z_points.^2);
     phi = zeros(1, numel(X));
     theta = zeros(1, numel(X));
-    
+
     ind = nxz < realmin;
     phi(ind & y_points > 0) = pi/2;
     phi(ind & y_points <= 0) = -pi/2;
-    
+
     ind = ~ind;
     phi(ind) = interp1(lookup_atan, 0:res_atan, ...
         y_points(ind)./nxz(ind), 'linear')*step_atan - (pi/2);
     theta(ind) = interp1(lookup_acos, 0:res_acos, ...
         -z_points(ind)./nxz(ind), 'linear')*step_acos;
     theta(ind & x_points < 0) = -theta(ind & x_points < 0);
-    
+
     % Find equivalent pixel co-ordinates
     inX = (theta / pi) * (input_width/2) + (input_width/2) + 1;
     inY = (phi / (pi/2)) * (input_height/2) + (input_height/2) + 1;
-    
+
     % Cap if out of bounds
     inX(inX < 1) = 1;
     inX(inX >= input_width) = input_width;
     inY(inY < 1) = 1;
     inY(inY >= input_height) = input_height;
-    
-    % Initialize output image
-    out{idx} = zeros([output_height, output_width, size(im,3)], class(im));
-    
-    % Store output colours here
-    out_pix = zeros(numel(X), size(im, 3));
-    
-    % For each pixel position calculated previously,
-    % get the corresponding colour values
-    for c = 1 : size(im, 3)
-        chan = double(im(:,:,c));
-        out_pix(:,c) = interp2(XImage, YImage, chan, inX, inY, 'linear');
+
+    % Fill in the bundled map
+    mapx_bundle(:, (idx - 1) * output_width + 1:idx * output_width) = reshape(inX, output_height, output_width);
+    mapy_bundle(:, (idx - 1) * output_width + 1:idx * output_width) = reshape(inY, output_height, output_width);
+end
+
+% Remap the image to bundled cubic faces
+out6 = zeros(output_height, output_width * 6, size(im, 3));
+for c = 1:size(im, 3)
+    out6(:, :, c) = interp2(im(:, :, c), mapx_bundle, mapy_bundle);
+end
+
+% Split each face
+for idx = 1:size(views, 1)
+    out{idx} = out6(:, (idx - 1) * output_width + 1:idx * output_width, :); 
+    if is_uint
+        out{idx} = im2uint8(out{idx}); 
     end
-    
-    % Each column of out_pix is the output of a single channel
-    % Reshape so that it becomes a matrix instead and place into output
-    for c = 1 : size(im, 3)
-        out{idx}(:,:,c) = cast(reshape(out_pix(:,c), output_height, ...
-            output_width), class(im));
-    end              
 end
 
 end
